@@ -4,7 +4,7 @@ const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT_KEY || 5000;
 const corsOptions = {
   origin: ['https://storage.googleapis.com', 'https://storage.googleapis.com/agenticweb/dist/index.html'],
   credentials: true, // If you send cookies or authorization headers
