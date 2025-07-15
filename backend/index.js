@@ -6,7 +6,7 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT_KEY || 5000;
 const corsOptions = {
-  origin: ['https://storage.googleapis.com', 'https://storage.googleapis.com/promptwebsite/dist/index.html'],
+  origin: ['https://storage.googleapis.com', 'https://storage.googleapis.com/webbuilderai/dist/index.html'],
   credentials: true,
 };
 
