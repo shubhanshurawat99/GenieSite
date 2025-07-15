@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT_KEY || 5000;
 const corsOptions = {
   origin: ['https://storage.googleapis.com', 'https://storage.googleapis.com/promptwebsite/dist/index.html'],
-  credentials: true, // If you send cookies or authorization headers
+  credentials: true,
 };
 
 // Middleware
@@ -18,6 +18,27 @@ app.use(express.json());
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
 });
+
+// Helper function to safely stringify JSON for SSE
+const safeJSONStringify = (obj) => {
+  try {
+    return JSON.stringify(obj);
+  } catch (error) {
+    console.error('JSON stringify error:', error);
+    // Return a safe error object
+    return JSON.stringify({
+      type: 'error',
+      error: 'JSON serialization failed',
+      details: 'Invalid characters in response'
+    });
+  }
+};
+
+// Helper function to send SSE data safely
+const sendSSEData = (res, data) => {
+  const jsonString = safeJSONStringify(data);
+  res.write(`data: ${jsonString}\n\n`);
+};
 
 // Function to clean generated code and fix href issues
 const cleanGeneratedCode = (rawCode) => {
@@ -46,7 +67,6 @@ const cleanGeneratedCode = (rawCode) => {
   }
   
   // Fix href="#" issues that break iframe preview
-  // Replace href="#" with href="javascript:void(0)" to prevent navigation
   cleaned = cleaned.replace(/href\s*=\s*["']#["']/g, 'href="javascript:void(0)"');
   
   // Also handle href="#something" patterns for anchor links
@@ -55,7 +75,7 @@ const cleanGeneratedCode = (rawCode) => {
   });
   
   // Add a script to handle smooth scrolling for anchor links if not already present
-  if (!cleaned.includes('data-scroll-to') || cleaned.includes('data-scroll-to')) {
+  if (cleaned.includes('data-scroll-to')) {
     const scriptToAdd = `
     <script>
     // Handle anchor link scrolling without breaking iframe
@@ -134,92 +154,120 @@ Provide only the HTML code without explanations or markdown formatting.`;
     let rawAnswer = "";
     let thoughtsStarted = false;
     let answerStarted = false;
+    let progressCounter = 0;
 
-    const response = await ai.models.generateContentStream({
-      model: "gemini-2.5-pro",
-      contents: fullPrompt,
-      config: {
-        thinkingConfig: {
-          includeThoughts: true,
+    try {
+      const response = await ai.models.generateContentStream({
+        model: "gemini-2.5-pro",
+        contents: fullPrompt,
+        config: {
+          thinkingConfig: {
+            includeThoughts: true,
+          },
         },
-      },
-    });
+      });
 
-    for await (const chunk of response) {
-      for (const part of chunk.candidates[0].content.parts) {
-        if (!part.text) {
-          continue;
-        } else if (part.thought) {
-          // Handle thoughts
-          if (!thoughtsStarted) {
-            res.write(`data: ${JSON.stringify({
-              type: 'thoughts_start',
-              message: 'AI is thinking...'
-            })}\n\n`);
-            thoughtsStarted = true;
-          }
-          
-          // Stream thoughts in smaller chunks for smoother display
-          const words = part.text.split(' ');
-          for (const word of words) {
-            thoughts += word + ' ';
-            res.write(`data: ${JSON.stringify({
-              type: 'thoughts',
-              content: word + ' '
-            })}\n\n`);
+      for await (const chunk of response) {
+        for (const part of chunk.candidates[0].content.parts) {
+          if (!part.text) {
+            continue;
+          } else if (part.thought) {
+            // Handle thoughts
+            if (!thoughtsStarted) {
+              sendSSEData(res, {
+                type: 'thoughts_start',
+                message: 'AI is thinking...'
+              });
+              thoughtsStarted = true;
+            }
             
-            // Small delay for word-by-word effect
-            await new Promise(resolve => setTimeout(resolve, 50));
+            // Clean the thought text to avoid JSON issues
+            const cleanThoughtText = part.text.replace(/[\r\n]+/g, ' ').trim();
+            thoughts += cleanThoughtText + ' ';
+            
+            // Send thoughts in chunks, but escape properly
+            sendSSEData(res, {
+              type: 'thoughts',
+              content: cleanThoughtText + ' '
+            });
+            
+            // Small delay for smoother display
+            await new Promise(resolve => setTimeout(resolve, 100));
+          } else {
+            // Handle answer (code generation)
+            if (!answerStarted) {
+              sendSSEData(res, {
+                type: 'answer_start',
+                message: 'Generating code...'
+              });
+              answerStarted = true;
+            }
+            
+            // Accumulate raw answer
+            rawAnswer += part.text;
+            progressCounter++;
+            
+            // Send progress indicator with better calculation
+            const estimatedProgress = Math.min((progressCounter * 2), 95);
+            sendSSEData(res, {
+              type: 'progress',
+              message: 'Generating code...',
+              progress: estimatedProgress
+            });
           }
-        } else {
-          // Handle answer (code generation)
-          if (!answerStarted) {
-            res.write(`data: ${JSON.stringify({
-              type: 'answer_start',
-              message: 'Generating code...'
-            })}\n\n`);
-            answerStarted = true;
-          }
-          
-          // Accumulate raw answer but don't send code chunks to frontend
-          rawAnswer += part.text;
-          
-          // Send progress indicator instead of actual code chunks
-          res.write(`data: ${JSON.stringify({
-            type: 'progress',
-            message: 'Generating code...',
-            progress: Math.min(rawAnswer.length / 1000, 95) // Rough progress indicator
-          })}\n\n`);
         }
       }
-    }
 
-    // Clean up the generated code only after complete generation
-    const cleanedCode = cleanGeneratedCode(rawAnswer);
-    
-    // Validate that we have valid HTML
-    if (!cleanedCode.includes('<html') && !cleanedCode.includes('<!DOCTYPE')) {
-      throw new Error('Generated code does not contain valid HTML structure');
+      // Clean up the generated code only after complete generation
+      const cleanedCode = cleanGeneratedCode(rawAnswer);
+      
+      // Validate that we have valid HTML
+      if (!cleanedCode.includes('<html') && !cleanedCode.includes('<!DOCTYPE')) {
+        throw new Error('Generated code does not contain valid HTML structure');
+      }
+      
+      // Send final result with cleaned code
+      sendSSEData(res, {
+        type: 'complete',
+        success: true,
+        code: cleanedCode,
+        thoughts: thoughts.trim()
+      });
+      
+    } catch (streamError) {
+      console.error('Streaming error:', streamError);
+      sendSSEData(res, {
+        type: 'error',
+        error: 'Stream processing failed',
+        details: streamError.message
+      });
     }
-    
-    // Send final result with cleaned code
-    res.write(`data: ${JSON.stringify({
-      type: 'complete',
-      success: true,
-      code: cleanedCode,
-      thoughts: thoughts.trim()
-    })}\n\n`);
     
     res.end();
     
   } catch (error) {
     console.error('Error generating website:', error);
     
-    res.write(`data: ${JSON.stringify({
-      type: 'error',
-      error: 'Failed to generate website',
-      details: error.message
-    })}\n\n`);
+    // Ensure we can always send a response
+    try {
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "Cache-Control",
+        });
+      }
+      
+      sendSSEData(res, {
+        type: 'error',
+        error: 'Failed to generate website',
+        details: error.message
+      });
+    } catch (finalError) {
+      console.error('Final error sending response:', finalError);
+    }
     
     res.end();
   }
