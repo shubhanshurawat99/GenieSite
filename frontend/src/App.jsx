@@ -61,7 +61,7 @@
       setActiveTab('code'); // Switch to code tab automatically
       
       try {
-        const response = await fetch('http://localhost:5000/api/generate-website', {
+        const response = await fetch('https://geniesite-532228050988.europe-west1.run.app', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt })
