@@ -5,9 +5,13 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const corsOptions = {
+  origin: ['https://storage.googleapis.com', 'https://storage.googleapis.com/geniesite/dist/index.html'],
+  credentials: true, // If you send cookies or authorization headers
+};
 
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Initialize Google GenAI
