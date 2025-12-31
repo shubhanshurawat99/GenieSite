@@ -58,7 +58,7 @@ const generateWebsite = async (prompt) => {
   setActiveTab('code');
 
   try {
-    const response = await fetch('https://13.234.66.154/:5000/api/generate', {
+    const response = await fetch('http://localhost:5000/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt })
