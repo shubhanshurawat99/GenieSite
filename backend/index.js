@@ -4,10 +4,14 @@ const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT_KEY || 5000;
+const PORT = process.env.PORT || 5000;
+
+// CORS configuration for local development
 const corsOptions = {
-  origin: ['https://storage.googleapis.com', 'https://storage.googleapis.com/agenticaiwebsite/dist/index.html'],
+  origin: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'],
   credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
 
 // Middleware
@@ -25,7 +29,6 @@ const safeJSONStringify = (obj) => {
     return JSON.stringify(obj);
   } catch (error) {
     console.error('JSON stringify error:', error);
-    // Return a safe error object
     return JSON.stringify({
       type: 'error',
       error: 'JSON serialization failed',
@@ -42,43 +45,32 @@ const sendSSEData = (res, data) => {
 
 // Function to clean generated code and fix href issues
 const cleanGeneratedCode = (rawCode) => {
-  // Remove markdown code blocks
   let cleaned = rawCode.replace(/```html\n?/g, '').replace(/```\n?/g, '');
-  
-  // Remove any leading/trailing whitespace
   cleaned = cleaned.trim();
   
-  // Remove any explanatory text before the HTML
   const htmlStart = cleaned.indexOf('<!DOCTYPE html>');
   if (htmlStart !== -1) {
     cleaned = cleaned.substring(htmlStart);
   } else {
-    // If no DOCTYPE, look for <html> tag
     const htmlTagStart = cleaned.indexOf('<html');
     if (htmlTagStart !== -1) {
       cleaned = cleaned.substring(htmlTagStart);
     }
   }
   
-  // Remove any text after the closing </html> tag
   const htmlEnd = cleaned.lastIndexOf('</html>');
   if (htmlEnd !== -1) {
     cleaned = cleaned.substring(0, htmlEnd + 7);
   }
   
-  // Fix href="#" issues that break iframe preview
   cleaned = cleaned.replace(/href\s*=\s*["']#["']/g, 'href="javascript:void(0)"');
-  
-  // Also handle href="#something" patterns for anchor links
   cleaned = cleaned.replace(/href\s*=\s*["']#([^"']+)["']/g, (match, anchor) => {
     return `href="javascript:void(0)" data-scroll-to="${anchor}"`;
   });
   
-  // Add a script to handle smooth scrolling for anchor links if not already present
   if (cleaned.includes('data-scroll-to')) {
     const scriptToAdd = `
     <script>
-    // Handle anchor link scrolling without breaking iframe
     document.addEventListener('DOMContentLoaded', function() {
       const anchorLinks = document.querySelectorAll('[data-scroll-to]');
       anchorLinks.forEach(link => {
@@ -95,7 +87,6 @@ const cleanGeneratedCode = (rawCode) => {
         });
       });
       
-      // Prevent any remaining # links from causing navigation
       const hashLinks = document.querySelectorAll('a[href="javascript:void(0)"]');
       hashLinks.forEach(link => {
         link.addEventListener('click', function(e) {
@@ -105,7 +96,6 @@ const cleanGeneratedCode = (rawCode) => {
     });
     </script>`;
     
-    // Insert the script before closing body tag
     if (cleaned.includes('</body>')) {
       cleaned = cleaned.replace('</body>', scriptToAdd + '\n</body>');
     } else if (cleaned.includes('</html>')) {
@@ -116,39 +106,35 @@ const cleanGeneratedCode = (rawCode) => {
   return cleaned;
 };
 
-// Route to generate website code with real-time streaming
-app.post('/api/generate-website', async (req, res) => {
+// Main route - matches frontend's expected endpoint
+// At top, after loading env:
+if (!process.env.GEMINI_API_KEY) {
+  console.error('❌ GEMINI_API_KEY is missing. Please set it in environment variables.');
+  // Note: don't exit the process here in dev; just log so it's visible.
+}
+
+// ...existing code...
+
+app.post('/api/generate', async (req, res) => {
   try {
     const { prompt } = req.body;
-    
+
     if (!prompt) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
 
-    const fullPrompt = `Create a complete HTML website based on: "${prompt}".
+    console.log(`📝 Generating website for prompt: "${prompt}"`);
 
-Requirements:
-- Single HTML file with embedded CSS and JavaScript
-- Modern, responsive design
-- Clean, professional appearance
-- Fully functional
-- Use only vanilla HTML, CSS, and JavaScript
-- No external libraries or frameworks
-- Start with <!DOCTYPE html> and end with </html>
-- Include complete HTML structure
-- For navigation links that don't go to external URLs, use meaningful href attributes or proper anchor links to sections
-- If using placeholder links, make them functional (either scroll to sections or show relevant content)
-- Ensure all interactive elements work properly
-
-Provide only the HTML code without explanations or markdown formatting.`;
-
+    // set SSE headers
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Cache-Control",
+      "Access-Control-Allow-Headers": "Content-Type, Cache-Control"
     });
+
+    const fullPrompt = `Create a complete HTML website based on: "${prompt}".\n\nRequirements:\n- Single HTML file with embedded CSS and JavaScript\n- Modern, responsive design\n- ... (same as before)`;
 
     let thoughts = "";
     let rawAnswer = "";
@@ -158,7 +144,7 @@ Provide only the HTML code without explanations or markdown formatting.`;
 
     try {
       const response = await ai.models.generateContentStream({
-        model: "gemini-2.5-pro",
+        model: "gemini-2.5-flash",
         contents: fullPrompt,
         config: {
           thinkingConfig: {
@@ -168,46 +154,50 @@ Provide only the HTML code without explanations or markdown formatting.`;
       });
 
       for await (const chunk of response) {
-        for (const part of chunk.candidates[0].content.parts) {
-          if (!part.text) {
-            continue;
-          } else if (part.thought) {
-            // Handle thoughts
+        // robust handling: ensure chunk.candidates exists and is iterable
+        if (!chunk || !Array.isArray(chunk.candidates) || !chunk.candidates[0]) {
+          continue;
+        }
+
+        const candidate = chunk.candidates[0];
+        if (!candidate.content || !Array.isArray(candidate.content.parts)) continue;
+
+        for (const part of candidate.content.parts) {
+          if (!part || !part.text) continue;
+
+          if (part.thought) {
             if (!thoughtsStarted) {
               sendSSEData(res, {
                 type: 'thoughts_start',
                 message: 'AI is thinking...'
               });
               thoughtsStarted = true;
+              console.log('🧠 AI thinking process started...');
             }
-            
-            // Clean the thought text to avoid JSON issues
+
             const cleanThoughtText = part.text.replace(/[\r\n]+/g, ' ').trim();
             thoughts += cleanThoughtText + ' ';
-            
-            // Send thoughts in chunks, but escape properly
+
             sendSSEData(res, {
               type: 'thoughts',
               content: cleanThoughtText + ' '
             });
-            
-            // Small delay for smoother display
-            await new Promise(resolve => setTimeout(resolve, 100));
+
+            // small pause to make SSE readable in frontend (optional)
+            await new Promise(resolve => setTimeout(resolve, 40));
           } else {
-            // Handle answer (code generation)
             if (!answerStarted) {
               sendSSEData(res, {
                 type: 'answer_start',
                 message: 'Generating code...'
               });
               answerStarted = true;
+              console.log('⚙️  Code generation started...');
             }
-            
-            // Accumulate raw answer
+
             rawAnswer += part.text;
             progressCounter++;
-            
-            // Send progress indicator with better calculation
+
             const estimatedProgress = Math.min((progressCounter * 2), 95);
             sendSSEData(res, {
               type: 'progress',
@@ -218,66 +208,108 @@ Provide only the HTML code without explanations or markdown formatting.`;
         }
       }
 
-      // Clean up the generated code only after complete generation
+      // finish
+      console.log('🔧 Cleaning generated code...');
       const cleanedCode = cleanGeneratedCode(rawAnswer);
-      
-      // Validate that we have valid HTML
-      if (!cleanedCode.includes('<html') && !cleanedCode.includes('<!DOCTYPE')) {
+
+      if (!cleanedCode || (!cleanedCode.includes('<html') && !cleanedCode.includes('<!DOCTYPE'))) {
         throw new Error('Generated code does not contain valid HTML structure');
       }
-      
-      // Send final result with cleaned code
+
+      console.log('✅ Website generated successfully!');
       sendSSEData(res, {
         type: 'complete',
         success: true,
         code: cleanedCode,
         thoughts: thoughts.trim()
       });
-      
+
     } catch (streamError) {
-      console.error('Streaming error:', streamError);
-      sendSSEData(res, {
-        type: 'error',
-        error: 'Stream processing failed',
-        details: streamError.message
-      });
+      console.error('❌ Streaming error:', streamError && streamError.message ? streamError.message : streamError);
+      try {
+        sendSSEData(res, {
+          type: 'error',
+          error: 'Stream processing failed',
+          details: streamError && streamError.message ? streamError.message : String(streamError)
+        });
+      } catch (sseErr) {
+        console.error('❌ Failed to send SSE error event:', sseErr);
+      }
+    } finally {
+      // end the SSE connection
+      try {
+        res.end();
+      } catch (e) {
+        console.warn('res.end() failed:', e);
+      }
     }
-    
-    res.end();
-    
+
   } catch (error) {
-    console.error('Error generating website:', error);
-    
-    // Ensure we can always send a response
-    try {
-      if (!res.headersSent) {
-        res.writeHead(200, {
+    console.error('❌ Error generating website:', error);
+
+    if (!res.headersSent) {
+      try {
+        res.writeHead(500, {
           "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
+          "Cache-Control": "no-cache, no-transform",
           Connection: "keep-alive",
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Cache-Control",
+          "Access-Control-Allow-Headers": "Content-Type, Cache-Control"
         });
+      } catch (e) {
+        console.warn('Failed to write headers in fallback error handler:', e);
       }
-      
+    }
+
+    try {
       sendSSEData(res, {
         type: 'error',
         error: 'Failed to generate website',
         details: error.message
       });
-    } catch (finalError) {
-      console.error('Final error sending response:', finalError);
+    } catch (e) {
+      console.error('❌ Final error sending response:', e);
     }
-    
-    res.end();
+
+    try { res.end(); } catch (e) { /* ignore */ }
   }
+});
+
+
+// Legacy endpoint (for backward compatibility)
+app.post('/api/generate-website', async (req, res) => {
+  console.log('⚠️  Legacy endpoint called, redirecting to /api/generate');
+  req.url = '/api/generate';
+  return app._router.handle(req, res);
 });
 
 // Health check route
 app.get('/health', (req, res) => {
-  res.json({ status: 'Server is running' });
+  res.json({ 
+    status: 'Server is running',
+    timestamp: new Date().toISOString(),
+    port: PORT
+  });
+});
+
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'GenieSite API Server',
+    version: '1.0.0',
+    endpoints: {
+      generate: 'POST /api/generate',
+      health: 'GET /health'
+    }
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log('\n🚀 ===================================');
+  console.log(`🚀 GenieSite Server is running!`);
+  console.log(`🚀 ===================================`);
+  console.log(`📡 Server URL: http://localhost:${PORT}`);
+  console.log(`📡 API endpoint: http://localhost:${PORT}/api/generate`);
+  console.log(`🏥 Health check: http://localhost:${PORT}/health`);
+  console.log(`🚀 ===================================\n`);
 });
